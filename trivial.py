@@ -5,7 +5,9 @@ from itertools import chain
 from collections import Counter, defaultdict
 from pathlib import Path
 from sklearn.naive_bayes import MultinomialNB
+from sklearn.metrics import roc_auc_score
 import csv
+from utils import *
 
 tag_names = Path("dataset")/"genome-tags.csv"                   # tag name lookup
 movie_review_relevance = Path("dataset")/"genome-scores.csv"    # movieid/tagid/relevance
@@ -47,7 +49,6 @@ print("ALL TESTING USER-MOVIE PAIRS HAVE NO REVIEWS")
 #     print("trivial solution % true = ", pos/total)
 print("trivial solution % true =  0.48282997052437016")
 
-
 genres = ['Drama', 'Comedy', 'Thriller', 'Romance', 'Action', 'Crime', 'Horror', 'Documentary', 'Adventure', 'Sci-Fi', 'Mystery', 'Fantasy', 'War', 'Children', 'Musical', 'Animation', 'Western', 'Film-Noir', 'none/other', 'IMAX']
 with open(movie_genres, newline="") as csvfile:
     reader = csv.DictReader(csvfile)
@@ -65,25 +66,52 @@ with open(Xs, newline="") as csvfile:
         else:
             neg_user_movies[userid].append(movieid)
 
+
+pred_ys = []
+y_true = []
 acc_num = 0
 acc_denom = 0
 
+fitted_users = {}
+
 with open(val_set, newline="") as csvfile:
     reader = csv.DictReader(csvfile)
-    for rating in reader:
+
+    movieid_mid_lookup = get_movieid_mid_lookup()
+    mid_to_proj_tag = build_pca_model(1, recompute=True)
+
+    for i, rating in tqdm(list(enumerate(reader))):
         userid = int(float(rating["userId"]))
         movieid = int(float(rating["movieId"]))
-        pos_Xs = [movie_genres_one_hot[train_movieid] for train_movieid in pos_user_movies[userid]]
-        neg_Xs = [movie_genres_one_hot[train_movieid] for train_movieid in neg_user_movies[userid]]
 
-        Xs = pos_Xs + neg_Xs
-        ys = ([1]*len(pos_Xs)) + ([0]*len(neg_Xs))
+        if userid in fitted_users:
+            clf = fitted_users[userid]
+        else:
 
-        val_X = movie_genres_one_hot[movieid]
+            pos_Xs = [np.concatenate((
+                movie_genres_one_hot[train_movieid], 
+                mid_to_proj_tag[movieid_mid_lookup[train_movieid]]), axis=0) for train_movieid in pos_user_movies[userid]]
 
-        pred_y = MultinomialNB().fit(np.array(Xs), np.array(ys)).predict(np.array([val_X]))
-        if pred_y == (rating["rating"] == "1"):
-            acc_num += 1
-        acc_denom += 1
-        print(acc_num/acc_denom)
+            neg_Xs = [np.concatenate((
+                movie_genres_one_hot[train_movieid], 
+                mid_to_proj_tag[movieid_mid_lookup[train_movieid]]), axis=0) for train_movieid in neg_user_movies[userid]]
 
+            Xs = pos_Xs + neg_Xs
+            ys = ([1]*len(pos_Xs)) + ([0]*len(neg_Xs))
+
+            clf = MultinomialNB().fit(np.array(Xs), np.array(ys))
+            fitted_users[userid] = clf
+
+        val_X = np.concatenate((movie_genres_one_hot[movieid], mid_to_proj_tag[movieid_mid_lookup[movieid]]), axis=0)
+
+        probs = clf.predict_proba(np.array([val_X]))
+        pred_ys.append(probs[0][1]/(probs[0][1] + probs[0][0]))
+        y_true.append(rating["rating"] == "1")
+
+        if i % 2000 == 0:
+            print(y_true[-10:])
+            print(pred_ys[-10:])
+            try:
+                print(roc_auc_score(y_true, pred_ys))
+            except:
+                pass
